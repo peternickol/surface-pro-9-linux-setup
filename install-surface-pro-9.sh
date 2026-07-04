@@ -32,6 +32,7 @@ SURFACE_APT_KEYRING="${SURFACE_APT_KEYRING:-/usr/share/keyrings/linux-surface.gp
 SURFACE_APT_SOURCE="${SURFACE_APT_SOURCE:-/etc/apt/sources.list.d/linux-surface.list}"
 SURFACE_APT_REPO="${SURFACE_APT_REPO:-https://pkg.surfacelinux.com/debian}"
 SURFACE_MOK_CERT="${SURFACE_MOK_CERT:-/usr/share/linux-surface-secureboot/surface.cer}"
+SURFACE_ALLOW_UNSUPPORTED="${SURFACE_ALLOW_UNSUPPORTED:-0}"
 
 SURFACE_CORE_PACKAGES=(
   linux-image-surface
@@ -691,6 +692,36 @@ latest_installed_surface_kernel() {
     | tail -n 1
 }
 
+grub_menuentry_for_kernel() {
+  local kernel=$1
+  local grub_cfg="/boot/grub/grub.cfg"
+
+  if [[ ! -r "$grub_cfg" ]]; then
+    return 1
+  fi
+
+  awk -v kernel="$kernel" '
+    /^submenu / {
+      if (match($0, /'\''[^'\'']+'\''/)) {
+        submenu = substr($0, RSTART + 1, RLENGTH - 2)
+      }
+    }
+    /^[[:space:]]*menuentry / && index($0, "with Linux " kernel) {
+      if (match($0, /'\''[^'\'']+'\''/)) {
+        entry = substr($0, RSTART + 1, RLENGTH - 2)
+        if (submenu != "") {
+          print submenu ">" entry
+        } else {
+          print entry
+        }
+        found = 1
+        exit
+      }
+    }
+    END { exit found ? 0 : 1 }
+  ' "$grub_cfg"
+}
+
 prefer_surface_kernel_in_grub() {
   local kernel
   local menuentry
@@ -705,8 +736,12 @@ prefer_surface_kernel_in_grub() {
   set_grub_config_value "GRUB_DEFAULT" "saved" || return 1
 
   if need_cmd grub-set-default; then
-    menuentry="Advanced options for Ubuntu>Ubuntu, with Linux $kernel"
-    as_root grub-set-default "$menuentry" || return 1
+    if menuentry="$(grub_menuentry_for_kernel "$kernel")"; then
+      as_root grub-set-default "$menuentry" || return 1
+    else
+      warn "Could not find linux-surface kernel menu entry in /boot/grub/grub.cfg."
+      warn "Select the linux-surface kernel manually from GRUB Advanced options after reboot."
+    fi
   else
     warn "grub-set-default unavailable; select the linux-surface kernel manually from GRUB Advanced options."
   fi
@@ -796,7 +831,13 @@ main() {
   fi
 
   if ! is_surface_pro_9; then
-    warn "This machine does not identify itself as a Surface Pro 9. Continuing anyway."
+    if [[ "$SURFACE_ALLOW_UNSUPPORTED" == "1" ]]; then
+      warn "This machine does not identify itself as a Surface Pro 9. Continuing because SURFACE_ALLOW_UNSUPPORTED=1."
+    else
+      error "This machine does not identify itself as a Surface Pro 9."
+      error "Set SURFACE_ALLOW_UNSUPPORTED=1 to run anyway."
+      exit 1
+    fi
   fi
 
   install_prerequisites

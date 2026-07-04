@@ -43,8 +43,16 @@ The script also applies Surface Pro 9 desktop and boot tweaks:
 This is intended for the Intel Surface Pro 9 on Debian/Ubuntu-based
 distributions using `apt`.
 
-The script checks for `amd64` and warns if the machine does not identify itself
-as a Surface Pro 9.
+The script checks for `amd64` and exits if the machine does not identify itself
+as a Surface Pro 9. To run on unsupported hardware anyway, set
+`SURFACE_ALLOW_UNSUPPORTED=1`.
+
+## Important Changes
+
+This script installs packages and writes system configuration as root. It also
+updates GRUB and initramfs settings so the linux-surface kernel and Surface
+input modules are available on boot. Keep a backup boot option or recovery USB
+available before running it on a machine you depend on.
 
 ## Usage
 
@@ -56,6 +64,12 @@ chmod +x install-surface-pro-9.sh
 ```
 
 Reboot afterwards.
+
+To run on hardware that does not identify itself as a Surface Pro 9:
+
+```bash
+SURFACE_ALLOW_UNSUPPORTED=1 ./install-surface-pro-9.sh
+```
 
 If Secure Boot is enabled, enroll the linux-surface MOK key when prompted by the
 blue MokManager screen. The linux-surface package uses this password:
@@ -93,3 +107,7 @@ experimentation, but GDM still uses GNOME Shell's keyboard.
 If your system uses full-disk encryption, keep a USB keyboard available as a
 fallback until you have verified input at the unlock prompt after reboot. Most
 distributions do not provide an on-screen keyboard that early in boot.
+
+## License
+
+MIT License. See [`LICENSE`](./LICENSE).
