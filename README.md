@@ -110,8 +110,10 @@ If the Surface rotates too eagerly, toggle GNOME's rotation lock:
 surface-toggle-rotation-lock
 ```
 
-The installer places this helper in `~/.local/bin` and binds it to `Super+O`
-when a GNOME session is active. Override the binding while installing with:
+The helper prints the new state and shows a desktop notification when
+`notify-send` is available. The installer places this helper in `~/.local/bin`
+and binds it to `Super+O` when a GNOME session is active. Override the binding
+while installing with:
 
 ```bash
 SURFACE_ROTATION_LOCK_BINDING='<Super><Shift>o' ./install-surface-pro-9.sh

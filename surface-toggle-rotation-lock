@@ -4,6 +4,15 @@ set -Eeuo pipefail
 SCHEMA="org.gnome.settings-daemon.peripherals.touchscreen"
 KEY="orientation-lock"
 
+notify() {
+  local message=$1
+
+  printf '%s\n' "$message"
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send --app-name="Surface Rotation" "Surface Rotation" "$message" >/dev/null 2>&1 || true
+  fi
+}
+
 if ! command -v gsettings >/dev/null 2>&1; then
   printf 'surface-toggle-rotation-lock: gsettings is unavailable\n' >&2
   exit 1
@@ -14,11 +23,11 @@ current="$(gsettings get "$SCHEMA" "$KEY")"
 case "$current" in
   true)
     gsettings set "$SCHEMA" "$KEY" false
-    printf 'Rotation lock disabled; auto-rotation is enabled.\n'
+    notify "Rotation lock disabled; auto-rotation is enabled."
     ;;
   false)
     gsettings set "$SCHEMA" "$KEY" true
-    printf 'Rotation lock enabled; auto-rotation is paused.\n'
+    notify "Rotation lock enabled; auto-rotation is paused."
     ;;
   *)
     printf 'surface-toggle-rotation-lock: unexpected value for %s %s: %s\n' "$SCHEMA" "$KEY" "$current" >&2

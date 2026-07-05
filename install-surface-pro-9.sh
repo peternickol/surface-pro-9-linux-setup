@@ -47,6 +47,7 @@ SURFACE_SUPPORT_PACKAGES=(
   python3-gi
   thermald
   iio-sensor-proxy
+  libnotify-bin
   surface-control
   libcamera-tools
   gstreamer1.0-libcamera
