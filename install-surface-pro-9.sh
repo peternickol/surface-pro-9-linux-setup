@@ -578,6 +578,49 @@ SERVICE
   fi
 }
 
+install_rotation_lock_toggle() {
+  local user
+  local group
+  local home
+  local script_dir
+  local script_file
+  local source_file
+
+  source_file="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/surface-toggle-rotation-lock"
+  if [[ ! -r "$source_file" ]]; then
+    warn "Rotation lock toggle script not found; skipping: $source_file"
+    return 0
+  fi
+
+  user="$(desktop_user)"
+  if [[ -z "$user" ]]; then
+    warn "Could not determine the desktop user; skipping rotation lock toggle install."
+    return 0
+  fi
+
+  group="$(id -gn "$user" 2>/dev/null)" || {
+    warn "Could not determine primary group for $user; skipping rotation lock toggle install."
+    return 0
+  }
+  home="$(getent passwd "$user" | cut -d: -f6)"
+  if [[ -z "$home" ]]; then
+    warn "Could not determine home directory for $user; skipping rotation lock toggle install."
+    return 0
+  fi
+
+  info "Installing rotation lock toggle for $user"
+  script_dir="$home/.local/bin"
+  script_file="$script_dir/surface-toggle-rotation-lock"
+
+  if [[ "${EUID}" -eq 0 ]]; then
+    install -d -m 0755 -o "$user" -g "$group" "$script_dir"
+    install -m 0755 -o "$user" -g "$group" "$source_file" "$script_file"
+  else
+    install -d -m 0755 "$script_dir"
+    install -m 0755 "$source_file" "$script_file"
+  fi
+}
+
 secure_boot_enabled() {
   need_cmd mokutil && mokutil --sb-state 2>/dev/null | grep -qi 'SecureBoot enabled'
 }
@@ -847,6 +890,7 @@ main() {
   configure_services
   configure_gnome_tablet_settings
   install_surface_auto_rotate
+  install_rotation_lock_toggle
   configure_grub
   configure_iptsd_calibration
   configure_initramfs_modules
