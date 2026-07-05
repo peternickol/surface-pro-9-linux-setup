@@ -14,7 +14,7 @@ notify() {
 }
 
 if ! command -v gsettings >/dev/null 2>&1; then
-  printf 'surface-toggle-rotation-lock: gsettings is unavailable\n' >&2
+  printf 'surface-toggle-rotation-lock.sh: gsettings is unavailable\n' >&2
   exit 1
 fi
 
@@ -30,7 +30,7 @@ case "$current" in
     notify "Rotation lock enabled; auto-rotation is paused."
     ;;
   *)
-    printf 'surface-toggle-rotation-lock: unexpected value for %s %s: %s\n' "$SCHEMA" "$KEY" "$current" >&2
+    printf 'surface-toggle-rotation-lock.sh: unexpected value for %s %s: %s\n' "$SCHEMA" "$KEY" "$current" >&2
     exit 1
     ;;
 esac

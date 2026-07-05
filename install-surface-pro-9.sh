@@ -593,7 +593,7 @@ install_rotation_lock_toggle() {
   local script_file
   local source_file
 
-  source_file="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/surface-toggle-rotation-lock"
+  source_file="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/surface-toggle-rotation-lock.sh"
   if [[ ! -r "$source_file" ]]; then
     warn "Rotation lock toggle script not found; skipping: $source_file"
     return 0
@@ -617,7 +617,7 @@ install_rotation_lock_toggle() {
 
   info "Installing rotation lock toggle for $user"
   script_dir="$home/.local/bin"
-  script_file="$script_dir/surface-toggle-rotation-lock"
+  script_file="$script_dir/surface-toggle-rotation-lock.sh"
 
   if [[ "${EUID}" -eq 0 ]]; then
     install -d -m 0755 -o "$user" -g "$group" "$script_dir"
@@ -658,7 +658,7 @@ configure_rotation_lock_shortcut() {
   bus="/run/user/${uid}/bus"
   if [[ ! -S "$bus" ]]; then
     warn "No active D-Bus session found for $user; skipping rotation lock shortcut."
-    warn "Log into GNOME and rerun this script, or bind surface-toggle-rotation-lock manually."
+    warn "Log into GNOME and rerun this script, or bind surface-toggle-rotation-lock.sh manually."
     return 0
   fi
 
@@ -688,7 +688,7 @@ configure_rotation_lock_shortcut() {
     }
   fi
 
-  command="${home}/.local/bin/surface-toggle-rotation-lock"
+  command="${home}/.local/bin/surface-toggle-rotation-lock.sh"
   run_gsettings_for_desktop_user "$user" set "${shortcut_schema}:${shortcut_path}" name "$(gsettings_string "Toggle Rotation Lock")" \
     || record_failure "set rotation lock shortcut name"
   run_gsettings_for_desktop_user "$user" set "${shortcut_schema}:${shortcut_path}" command "$(gsettings_string "$command")" \
