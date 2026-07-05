@@ -33,6 +33,7 @@ SURFACE_APT_SOURCE="${SURFACE_APT_SOURCE:-/etc/apt/sources.list.d/linux-surface.
 SURFACE_APT_REPO="${SURFACE_APT_REPO:-https://pkg.surfacelinux.com/debian}"
 SURFACE_MOK_CERT="${SURFACE_MOK_CERT:-/usr/share/linux-surface-secureboot/surface.cer}"
 SURFACE_ALLOW_UNSUPPORTED="${SURFACE_ALLOW_UNSUPPORTED:-0}"
+SURFACE_ROTATION_LOCK_BINDING="${SURFACE_ROTATION_LOCK_BINDING:-<Super>r}"
 
 SURFACE_CORE_PACKAGES=(
   linux-image-surface
@@ -266,6 +267,11 @@ gnome_key_exists() {
   local key=$3
 
   run_gsettings_for_desktop_user "$user" list-keys "$schema" 2>/dev/null | grep -Fxq "$key"
+}
+
+gsettings_string() {
+  local value=$1
+  printf "'%s'" "${value//\'/\\\'}"
 }
 
 configure_gnome_tablet_settings() {
@@ -621,6 +627,75 @@ install_rotation_lock_toggle() {
   fi
 }
 
+configure_rotation_lock_shortcut() {
+  local user
+  local uid
+  local bus
+  local home
+  local media_schema="org.gnome.settings-daemon.plugins.media-keys"
+  local shortcut_schema="org.gnome.settings-daemon.plugins.media-keys.custom-keybinding"
+  local shortcut_path="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/surface-rotation-lock/"
+  local current_shortcuts
+  local updated_shortcuts
+  local command
+
+  if ! need_cmd gsettings; then
+    warn "gsettings unavailable; skipping rotation lock shortcut."
+    return 0
+  fi
+
+  user="$(desktop_user)"
+  if [[ -z "$user" ]]; then
+    warn "Could not determine the desktop user; skipping rotation lock shortcut."
+    return 0
+  fi
+
+  uid="$(id -u "$user" 2>/dev/null)" || {
+    warn "Could not determine uid for $user; skipping rotation lock shortcut."
+    return 0
+  }
+  bus="/run/user/${uid}/bus"
+  if [[ ! -S "$bus" ]]; then
+    warn "No active D-Bus session found for $user; skipping rotation lock shortcut."
+    warn "Log into GNOME and rerun this script, or bind surface-toggle-rotation-lock manually."
+    return 0
+  fi
+
+  home="$(getent passwd "$user" | cut -d: -f6)"
+  if [[ -z "$home" ]]; then
+    warn "Could not determine home directory for $user; skipping rotation lock shortcut."
+    return 0
+  fi
+
+  info "Configuring rotation lock shortcut for $user: $SURFACE_ROTATION_LOCK_BINDING"
+  current_shortcuts="$(run_gsettings_for_desktop_user "$user" get "$media_schema" custom-keybindings)" || {
+    record_failure "read GNOME custom keybindings"
+    return
+  }
+
+  if [[ $current_shortcuts != *"'${shortcut_path}'"* && $current_shortcuts != *"\"${shortcut_path}\""* ]]; then
+    if [[ $current_shortcuts == "[]" || $current_shortcuts == "@as []" ]]; then
+      updated_shortcuts="['${shortcut_path}']"
+    else
+      updated_shortcuts="${current_shortcuts%]}"
+      updated_shortcuts="${updated_shortcuts}, '${shortcut_path}']"
+    fi
+
+    run_gsettings_for_desktop_user "$user" set "$media_schema" custom-keybindings "$updated_shortcuts" || {
+      record_failure "register rotation lock shortcut"
+      return
+    }
+  fi
+
+  command="${home}/.local/bin/surface-toggle-rotation-lock"
+  run_gsettings_for_desktop_user "$user" set "${shortcut_schema}:${shortcut_path}" name "$(gsettings_string "Toggle Rotation Lock")" \
+    || record_failure "set rotation lock shortcut name"
+  run_gsettings_for_desktop_user "$user" set "${shortcut_schema}:${shortcut_path}" command "$(gsettings_string "$command")" \
+    || record_failure "set rotation lock shortcut command"
+  run_gsettings_for_desktop_user "$user" set "${shortcut_schema}:${shortcut_path}" binding "$(gsettings_string "$SURFACE_ROTATION_LOCK_BINDING")" \
+    || record_failure "set rotation lock shortcut binding"
+}
+
 secure_boot_enabled() {
   need_cmd mokutil && mokutil --sb-state 2>/dev/null | grep -qi 'SecureBoot enabled'
 }
@@ -891,6 +966,7 @@ main() {
   configure_gnome_tablet_settings
   install_surface_auto_rotate
   install_rotation_lock_toggle
+  configure_rotation_lock_shortcut
   configure_grub
   configure_iptsd_calibration
   configure_initramfs_modules

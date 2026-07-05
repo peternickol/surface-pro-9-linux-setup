@@ -35,6 +35,8 @@ The script also applies Surface Pro 9 desktop and boot tweaks:
   rotate the internal display correctly.
 - Installs `surface-toggle-rotation-lock` to pause or resume auto-rotation from
   a terminal or custom keyboard shortcut.
+- Binds `surface-toggle-rotation-lock` to `Super+R` in GNOME when a desktop
+  session is active.
 - Adds Surface input modules to initramfs so hardware input has a better chance
   of working at encrypted-disk unlock prompts.
 - Applies GRUB parameters for known Surface Pro 9 display/ACPI quirks.
@@ -108,9 +110,12 @@ If the Surface rotates too eagerly, toggle GNOME's rotation lock:
 surface-toggle-rotation-lock
 ```
 
-The installer places this helper in `~/.local/bin`. Bind it in GNOME Settings
-under Keyboard > View and Customize Shortcuts > Custom Shortcuts if you want a
-one-key rotation lock toggle.
+The installer places this helper in `~/.local/bin` and binds it to `Super+R`
+when a GNOME session is active. Override the binding while installing with:
+
+```bash
+SURFACE_ROTATION_LOCK_BINDING='<Super>o' ./install-surface-pro-9.sh
+```
 
 For the login screen and GNOME desktop on-screen keyboard, use GNOME's built-in
 screen keyboard. Maliit Keyboard is installed when available for post-login
