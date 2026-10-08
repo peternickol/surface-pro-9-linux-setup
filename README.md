@@ -63,8 +63,8 @@ settings and rotation helper require GNOME; GNOME Wayland is recommended for
 touch input. Other desktops can use the kernel/firmware setup, with their own
 desktop-specific tablet configuration.
 
-Ubuntu/Debian derivatives remain accepted, but the automated compatibility
-matrix covers Debian 12 and 13 only. Debian 11 and older are rejected; newer
+Ubuntu/Debian derivatives remain accepted, but local compatibility checks
+cover Debian 12 and 13 only. Debian 11 and older are rejected; newer
 releases and testing/sid report an unvalidated-release warning.
 
 The script checks for `amd64` and exits if the machine does not identify itself
@@ -236,8 +236,7 @@ The container check installs test tools and userspace support packages,
 configures the signed linux-surface repository, runs regression checks, and
 checks the installed iptsd unit and GNOME helper installation. It then simulates
 package installation alongside Debian's GNOME desktop and signed bootloader.
-It does not install or boot a Surface kernel. GitHub Actions runs this matrix
-on pushes and pull requests.
+It does not install or boot a Surface kernel. These checks are run locally.
 
 ## License
 
