@@ -1,0 +1,21 @@
+name: Debian compatibility
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  debian:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        release: [bookworm, trixie]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check scripts and Debian package dependencies
+        run: >-
+          docker run --rm --platform linux/amd64
+          --mount type=bind,src="$GITHUB_WORKSPACE",dst=/work,readonly
+          --workdir /work debian:${{ matrix.release }}-slim
+          bash tests/debian-packages.sh

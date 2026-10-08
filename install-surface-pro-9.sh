@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# Debian's regular users (and plain `su` sessions) may omit the sbin paths.
+export PATH="${PATH}:/usr/sbin:/sbin"
+
 if [[ -t 1 || -t 2 ]] && [[ "${NO_COLOR:-0}" != "1" ]]; then
   C_RESET=$'\033[0m'
   C_RED=$'\033[31m'
@@ -34,6 +37,10 @@ SURFACE_APT_REPO="${SURFACE_APT_REPO:-https://pkg.surfacelinux.com/debian}"
 SURFACE_MOK_CERT="${SURFACE_MOK_CERT:-/usr/share/linux-surface-secureboot/surface.cer}"
 SURFACE_ALLOW_UNSUPPORTED="${SURFACE_ALLOW_UNSUPPORTED:-0}"
 SURFACE_ROTATION_LOCK_BINDING="${SURFACE_ROTATION_LOCK_BINDING:-<Super>o}"
+SURFACE_DESKTOP_USER="${SURFACE_DESKTOP_USER:-}"
+
+DISTRO_ID=""
+DISTRO_ID_LIKE=""
 
 SURFACE_CORE_PACKAGES=(
   linux-image-surface
@@ -75,6 +82,73 @@ SURFACE_INITRAMFS_MODULES=(
 )
 
 FAILURES=()
+
+detect_distribution() {
+  local release_file=${1:-/etc/os-release}
+  local ID="" ID_LIKE="" VERSION_ID=""
+
+  if [[ ! -r "$release_file" ]]; then
+    error "Cannot identify this distribution: $release_file is missing."
+    return 1
+  fi
+  # shellcheck disable=SC1090
+  source "$release_file"
+  DISTRO_ID=$ID
+  DISTRO_ID_LIKE=$ID_LIKE
+
+  case " $ID $ID_LIKE " in
+    *" debian "*|*" ubuntu "*) ;;
+    *) error "This installer requires Debian or an Ubuntu/Debian derivative."; return 1 ;;
+  esac
+  if [[ "$ID" == debian ]]; then
+    case "$VERSION_ID" in
+      12|13) ;;
+      ''|*[!0-9]*) warn "Debian testing/unstable is not a validated target." ;;
+      *)
+        if ((VERSION_ID < 12)); then
+          error "Use Debian 12 (bookworm) or Debian 13 (trixie); older releases are unsupported."
+          return 1
+        fi
+        warn "This Debian release has not been validated; targets are Debian 12 and 13."
+        ;;
+    esac
+  fi
+  info "Detected ${PRETTY_NAME:-$ID}"
+}
+
+firmware_packages() {
+  case " $DISTRO_ID $DISTRO_ID_LIKE " in
+    *" ubuntu "*) printf '%s\n' linux-firmware intel-microcode ;;
+    *)
+      printf '%s\n' firmware-iwlwifi firmware-sof-signed intel-microcode
+      if apt_package_exists firmware-intel-graphics; then
+        printf '%s\n' firmware-intel-graphics
+      else
+        # Bookworm predates the split of Intel GPU firmware into its own package.
+        printf '%s\n' firmware-misc-nonfree
+      fi
+      ;;
+  esac
+}
+
+install_firmware() {
+  local package
+  local packages=()
+  local missing=()
+  mapfile -t packages < <(firmware_packages)
+  for package in "${packages[@]}"; do
+    if ! apt_package_exists "$package"; then
+      missing+=("$package")
+    fi
+  done
+  if ((${#missing[@]})); then
+    error "Required firmware packages have no APT candidate: ${missing[*]}"
+    warn "On Debian 12/13, enable non-free-firmware for your Debian sources, run apt-get update, then rerun."
+    warn "For deb822 .sources files, add it to Components:; for .list files, append it to the Debian deb lines."
+    return 1
+  fi
+  apt_install "${packages[@]}"
+}
 
 record_failure() {
   local item=$1
@@ -145,14 +219,23 @@ install_prerequisites() {
   if ! run_apt_update "before linux-surface repo setup"; then
     warn "Continuing because the prerequisite packages may still be installable from existing apt indexes."
   fi
-  apt_install ca-certificates curl gnupg || record_failure "linux-surface repo prerequisites"
+  apt_install ca-certificates curl gnupg
 }
 
 install_linux_surface_repository() {
+  local key_tmp
   info "Configuring linux-surface apt repository"
+  key_tmp="$(mktemp -d)"
+  if ! curl -fsSL "$SURFACE_APT_KEY_URL" -o "$key_tmp/surface.asc" \
+    || ! gpg --batch --dearmor -o "$key_tmp/surface.gpg" "$key_tmp/surface.asc"; then
+    rm -rf "$key_tmp"
+    error "Could not download/dearmor the linux-surface signing key; existing repository files were preserved."
+    return 1
+  fi
   as_root install -d -m 0755 "$(dirname "$SURFACE_APT_KEYRING")"
-  curl -fsSL "$SURFACE_APT_KEY_URL" | gpg --dearmor | as_root tee "$SURFACE_APT_KEYRING" >/dev/null
-  as_root chmod 0644 "$SURFACE_APT_KEYRING"
+  as_root install -m 0644 "$key_tmp/surface.gpg" "$SURFACE_APT_KEYRING"
+  rm -rf "$key_tmp"
+  as_root install -d -m 0755 "$(dirname "$SURFACE_APT_SOURCE")"
 
   printf 'deb [arch=amd64 signed-by=%s] %s release main\n' "$SURFACE_APT_KEYRING" "$SURFACE_APT_REPO" \
     | as_root tee "$SURFACE_APT_SOURCE" >/dev/null
@@ -162,18 +245,22 @@ install_linux_surface_repository() {
     warn "Checking whether the linux-surface kernel packages are available anyway."
   fi
 
-  require_surface_kernel_packages_available || exit 1
+  require_surface_packages_available || exit 1
 }
 
 apt_package_exists() {
-  apt-cache show "$1" >/dev/null 2>&1
+  # `show` also succeeds for installed-only and pinned-out packages.
+  LC_ALL=C apt-cache policy "$1" 2>/dev/null | awk '
+    $1 == "Candidate:" && $2 != "(none)" { found = 1 }
+    END { exit !found }
+  '
 }
 
-require_surface_kernel_packages_available() {
+require_surface_packages_available() {
   local missing=()
   local package
 
-  for package in linux-image-surface linux-headers-surface; do
+  for package in "${SURFACE_CORE_PACKAGES[@]}"; do
     if ! apt_package_exists "$package"; then
       missing+=("$package")
     fi
@@ -212,28 +299,53 @@ install_packages() {
   done
 }
 
+service_unit_exists() {
+  systemctl list-unit-files --no-legend "$1" | awk -v unit="$1" '
+    $1 == unit { found = 1 }
+    END { exit !found }
+  '
+}
+
 enable_service_if_present() {
   local service=$1
+  local load_state unit_state
 
-  if systemctl list-unit-files "$service" >/dev/null 2>&1; then
-    as_root systemctl enable --now "$service" || record_failure "enable service: $service"
-  fi
+  # list-unit-files can succeed with zero matches. Static units cannot be enabled.
+  load_state="$(systemctl show -p LoadState --value "$service")" || return 1
+  [[ "$load_state" == loaded ]] || return 0
+  unit_state="$(systemctl show -p UnitFileState --value "$service")" || return 1
+  case "$unit_state" in
+    masked*) warn "Service is masked; leaving it unchanged: $service" ;;
+    static|indirect) as_root systemctl start "$service" || record_failure "start service: $service" ;;
+    *) as_root systemctl enable --now "$service" || record_failure "enable service: $service" ;;
+  esac
 }
 
 configure_services() {
   info "Enabling Surface-related services when installed"
-  enable_service_if_present iptsd.service
+  # Templates have unit files but cannot be loaded without an instance name.
+  if service_unit_exists iptsd@.service; then
+    info "iptsd uses device instances; udev will start iptsd@*.service when the touchscreen appears after reboot."
+  else
+    enable_service_if_present iptsd.service
+  fi
   enable_service_if_present thermald.service
   enable_service_if_present iio-sensor-proxy.service
 }
 
 desktop_user() {
-  if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
-    printf '%s\n' "$SUDO_USER"
-  elif [[ -n "${USER:-}" && "${USER}" != "root" ]]; then
-    printf '%s\n' "$USER"
+  local user=""
+  if [[ -n "$SURFACE_DESKTOP_USER" ]]; then
+    user=$SURFACE_DESKTOP_USER
+  elif [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    user=$SUDO_USER
+  elif [[ "${EUID}" -ne 0 ]]; then
+    user="$(id -un)"
   else
-    logname 2>/dev/null || true
+    user="$(logname 2>/dev/null || true)"
+  fi
+  if [[ -n "$user" && "$user" != root ]] && id "$user" >/dev/null 2>&1; then
+    printf '%s\n' "$user"
   fi
 }
 
@@ -355,8 +467,13 @@ install_surface_auto_rotate() {
   local service_dir
   local service_file
 
-  if ! need_cmd python3 || ! python3 -c 'import gi; from gi.repository import Gio, GLib' >/dev/null 2>&1; then
+  if ! /usr/bin/python3 -c 'import gi; from gi.repository import Gio, GLib' >/dev/null 2>&1; then
     warn "python3 with PyGObject is unavailable; skipping Surface auto-rotate helper."
+    return 0
+  fi
+
+  if ! need_cmd gsettings || ! gsettings list-keys org.gnome.settings-daemon.peripherals.touchscreen 2>/dev/null | grep -Fxq orientation-lock; then
+    warn "GNOME touchscreen settings unavailable; skipping GNOME auto-rotate helper."
     return 0
   fi
 
@@ -386,7 +503,7 @@ install_surface_auto_rotate() {
   script_file="$script_dir/surface-auto-rotate"
   script_tmp="$(mktemp)"
   cat >"$script_tmp" <<'PY'
-#!/usr/bin/env python3
+#!/usr/bin/python3
 import os
 import re
 import subprocess
@@ -538,7 +655,7 @@ if __name__ == "__main__":
 PY
 
   if [[ "${EUID}" -eq 0 ]]; then
-    install -d -m 0755 -o "$user" -g "$group" "$script_dir"
+    runuser -u "$user" -- mkdir -p "$script_dir"
     install -m 0755 -o "$user" -g "$group" "$script_tmp" "$script_file"
   else
     install -d -m 0755 "$script_dir"
@@ -557,6 +674,8 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
+# A user bus can exist in KDE, an SSH session, or before GNOME has started.
+ExecCondition=/usr/bin/gdbus wait --session --timeout 1 org.gnome.Mutter.DisplayConfig
 ExecStart=%h/.local/bin/surface-auto-rotate
 Restart=on-failure
 RestartSec=2
@@ -566,7 +685,7 @@ WantedBy=graphical-session.target
 SERVICE
 
   if [[ "${EUID}" -eq 0 ]]; then
-    install -d -m 0755 -o "$user" -g "$group" "$service_dir"
+    runuser -u "$user" -- mkdir -p "$service_dir"
     install -m 0644 -o "$user" -g "$group" "$service_tmp" "$service_file"
   else
     install -d -m 0755 "$service_dir"
@@ -577,9 +696,10 @@ SERVICE
   uid="$(id -u "$user" 2>/dev/null)" || return 0
   bus="/run/user/${uid}/bus"
   if [[ -S "$bus" ]]; then
-    run_systemctl_for_desktop_user "$user" daemon-reload \
-      && run_systemctl_for_desktop_user "$user" enable --now surface-auto-rotate.service \
-      || record_failure "enable Surface auto-rotate user service"
+    if ! run_systemctl_for_desktop_user "$user" daemon-reload \
+      || ! run_systemctl_for_desktop_user "$user" enable --now surface-auto-rotate.service; then
+      record_failure "enable Surface auto-rotate user service"
+    fi
   else
     warn "Log into GNOME and run: systemctl --user enable --now surface-auto-rotate.service"
   fi
@@ -620,7 +740,7 @@ install_rotation_lock_toggle() {
   script_file="$script_dir/surface-toggle-rotation-lock"
 
   if [[ "${EUID}" -eq 0 ]]; then
-    install -d -m 0755 -o "$user" -g "$group" "$script_dir"
+    runuser -u "$user" -- mkdir -p "$script_dir"
     install -m 0755 -o "$user" -g "$group" "$source_file" "$script_file"
   else
     install -d -m 0755 "$script_dir"
@@ -669,6 +789,10 @@ configure_rotation_lock_shortcut() {
   fi
 
   info "Configuring rotation lock shortcut for $user: $SURFACE_ROTATION_LOCK_BINDING"
+  if ! gnome_key_exists "$user" "$media_schema" custom-keybindings; then
+    warn "GNOME media-key settings unavailable; skipping rotation lock shortcut."
+    return 0
+  fi
   current_shortcuts="$(run_gsettings_for_desktop_user "$user" get "$media_schema" custom-keybindings)" || {
     record_failure "read GNOME custom keybindings"
     return
@@ -702,10 +826,7 @@ secure_boot_enabled() {
 }
 
 surface_mok_enrolled() {
-  local status
-
-  status="$(mokutil --test-key "$SURFACE_MOK_CERT" 2>&1 || true)"
-  [[ "$status" != *"is not enrolled"* ]]
+  as_root mokutil --test-key "$SURFACE_MOK_CERT" >/dev/null 2>&1
 }
 
 queue_surface_mok_enrollment() {
@@ -727,7 +848,10 @@ queue_surface_mok_enrollment() {
 
   info "Queueing linux-surface Secure Boot MOK enrollment"
   hashfile="$(mktemp)"
-  mokutil --generate-hash=surface >"$hashfile"
+  if ! mokutil --generate-hash=surface >"$hashfile"; then
+    rm -f "$hashfile"
+    return 1
+  fi
   if as_root mokutil --hash-file "$hashfile" --import "$SURFACE_MOK_CERT"; then
     rm -f "$hashfile"
     warn "On next boot, enroll the linux-surface MOK key when prompted; password: surface"
@@ -740,72 +864,31 @@ queue_surface_mok_enrollment() {
   return 1
 }
 
-ensure_grub_cmdline_token() {
-  local token=$1
-  local file="/etc/default/grub"
+write_surface_grub_defaults() {
+  local file=${1:-/etc/default/grub.d/99-surface-pro-9.cfg}
   local tmp
-
-  if [[ ! -f "$file" ]]; then
-    warn "$file not found; skipping GRUB kernel parameter: $token"
-    return 0
-  fi
-
-  if grep -Fq "$token" "$file"; then
-    return 0
-  fi
-
   tmp="$(mktemp)"
-
-  if grep -Eq '^[[:space:]]*GRUB_CMDLINE_LINUX_DEFAULT="' "$file"; then
-    awk -v token="$token" '
-      /^GRUB_CMDLINE_LINUX_DEFAULT="/ && changed == 0 {
-        sub(/"$/, " " token "\"")
-        changed = 1
-      }
-      { print }
-    ' "$file" >"$tmp"
-  else
-    cp "$file" "$tmp"
-    printf 'GRUB_CMDLINE_LINUX_DEFAULT="%s"\n' "$token" >>"$tmp"
+  cat >"$tmp" <<'GRUB'
+# Managed by install-surface-pro-9.sh. Preserve the distribution/user command line.
+for surface_parameter in i915.enable_psr=0 pci=hpiosize=0; do
+  case " ${GRUB_CMDLINE_LINUX_DEFAULT:-} " in
+    *" $surface_parameter "*) ;;
+    *) GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT:+$GRUB_CMDLINE_LINUX_DEFAULT }$surface_parameter" ;;
+  esac
+done
+unset surface_parameter
+GRUB_DEFAULT=saved
+GRUB
+  if ! as_root install -d -m 0755 "$(dirname "$file")" \
+    || ! as_root install -m 0644 "$tmp" "$file"; then
+    rm -f "$tmp"
+    return 1
   fi
-
-  as_root install -m 0644 "$tmp" "$file"
-  rm -f "$tmp"
-}
-
-set_grub_config_value() {
-  local key=$1
-  local value=$2
-  local file="/etc/default/grub"
-  local tmp
-
-  if [[ ! -f "$file" ]]; then
-    warn "$file not found; skipping GRUB setting: $key"
-    return 0
-  fi
-
-  tmp="$(mktemp)"
-
-  awk -v key="$key" -v value="$value" '
-    $0 ~ "^[[:space:]]*" key "=" && changed == 0 {
-      print key "=" value
-      changed = 1
-      next
-    }
-    { print }
-    END {
-      if (changed == 0) {
-        print key "=" value
-      }
-    }
-  ' "$file" >"$tmp"
-
-  as_root install -m 0644 "$tmp" "$file"
   rm -f "$tmp"
 }
 
 latest_installed_surface_kernel() {
-  find /boot -maxdepth 1 -type f -name 'vmlinuz-*-surface*' -printf '%f\n' 2>/dev/null \
+  as_root find /boot -maxdepth 1 -type f -name 'vmlinuz-*-surface*' -printf '%f\n' 2>/dev/null \
     | sed 's/^vmlinuz-//' \
     | sort -V \
     | tail -n 1
@@ -813,13 +896,14 @@ latest_installed_surface_kernel() {
 
 grub_menuentry_for_kernel() {
   local kernel=$1
-  local grub_cfg="/boot/grub/grub.cfg"
+  local grub_cfg=${2:-/boot/grub/grub.cfg}
 
-  if [[ ! -r "$grub_cfg" ]]; then
+  if ! as_root test -r "$grub_cfg"; then
     return 1
   fi
 
-  awk -v kernel="$kernel" '
+  # shellcheck disable=SC2016
+  as_root awk -v kernel="$kernel" '
     /^submenu / {
       if (match($0, /'\''[^'\'']+'\''/)) {
         submenu = substr($0, RSTART + 1, RLENGTH - 2)
@@ -852,7 +936,6 @@ prefer_surface_kernel_in_grub() {
   fi
 
   info "Setting GRUB default to linux-surface kernel: $kernel"
-  set_grub_config_value "GRUB_DEFAULT" "saved" || return 1
 
   if need_cmd grub-set-default; then
     if menuentry="$(grub_menuentry_for_kernel "$kernel")"; then
@@ -867,16 +950,18 @@ prefer_surface_kernel_in_grub() {
 }
 
 configure_grub() {
-  info "Adding Surface Pro 9 kernel parameters"
-  ensure_grub_cmdline_token "i915.enable_psr=0" || record_failure "set GRUB parameter: i915.enable_psr=0"
-  ensure_grub_cmdline_token "pci=hpiosize=0" || record_failure "set GRUB parameter: pci=hpiosize=0"
-  prefer_surface_kernel_in_grub || record_failure "set linux-surface kernel as GRUB default"
-
-  if need_cmd update-grub; then
-    as_root update-grub || record_failure "update GRUB"
-  else
-    warn "update-grub unavailable; update your bootloader so the linux-surface kernel is detected."
+  local defaults_file=${1:-/etc/default/grub}
+  if ! need_cmd update-grub || [[ ! -f "$defaults_file" ]]; then
+    warn "GRUB is not configured; configure your bootloader for the Surface kernel manually."
+    warn "Surface Pro 9 kernel parameters: i915.enable_psr=0 pci=hpiosize=0"
+    return 0
   fi
+
+  info "Adding Surface Pro 9 kernel parameters in /etc/default/grub.d/99-surface-pro-9.cfg"
+  write_surface_grub_defaults /etc/default/grub.d/99-surface-pro-9.cfg || { record_failure "write Surface GRUB defaults"; return; }
+  # Generate the menu before looking up the newly installed kernel's entry.
+  as_root update-grub || { record_failure "update GRUB"; return; }
+  prefer_surface_kernel_in_grub || record_failure "set linux-surface kernel as GRUB default"
 }
 
 configure_iptsd_calibration() {
@@ -895,7 +980,7 @@ configure_initramfs_modules() {
   local module
   local modules_string
 
-  if [[ -d /etc/initramfs-tools ]]; then
+  if need_cmd update-initramfs; then
     info "Ensuring Surface input modules are available in initramfs"
     as_root touch "$file"
     for module in "${SURFACE_INITRAMFS_MODULES[@]}"; do
@@ -904,24 +989,17 @@ configure_initramfs_modules() {
       fi
     done
 
-    if need_cmd update-initramfs; then
-      as_root update-initramfs -u -k all || record_failure "update initramfs"
-    else
-      warn "update-initramfs unavailable; rebuild initramfs manually."
-    fi
-  elif [[ -d /etc/dracut.conf.d ]]; then
+    as_root update-initramfs -u -k all || record_failure "update initramfs"
+  elif need_cmd dracut; then
     info "Ensuring Surface input modules are available in dracut"
+    as_root install -d -m 0755 /etc/dracut.conf.d
     modules_string="${SURFACE_INITRAMFS_MODULES[*]}"
     printf 'add_drivers+=" %s "\nforce_drivers+=" pinctrl_tigerlake "\n' "$modules_string" \
       | as_root tee /etc/dracut.conf.d/surface_pro_9_input.conf >/dev/null
 
-    if need_cmd dracut; then
-      as_root dracut -f --regenerate-all || record_failure "regenerate dracut initramfs"
-    else
-      warn "dracut unavailable; rebuild initramfs manually."
-    fi
+    as_root dracut -f --regenerate-all || record_failure "regenerate dracut initramfs"
   else
-    warn "No initramfs-tools or dracut config directory found; skipping Surface input initramfs fix."
+    record_failure "No update-initramfs or dracut command found; rebuild the initramfs with Surface input drivers manually."
   fi
 }
 
@@ -939,7 +1017,8 @@ print_failure_summary() {
 }
 
 main() {
-  if ! need_cmd apt-get; then
+  detect_distribution /etc/os-release || exit 1
+  if ! need_cmd apt-get || ! need_cmd apt-cache || ! need_cmd dpkg; then
     error "This script expects apt-get and is intended for Debian/Ubuntu-based systems."
     exit 1
   fi
@@ -959,16 +1038,34 @@ main() {
     fi
   fi
 
+  if ! need_cmd systemctl || [[ ! -d /run/systemd/system ]]; then
+    error "Run this installer on the booted system with systemd (not in a container/chroot)."
+    exit 1
+  fi
+  if [[ "$EUID" -ne 0 ]]; then
+    if ! need_cmd sudo; then
+      error "sudo is not installed. Use su - to become root, then run this script with SURFACE_DESKTOP_USER set."
+      exit 1
+    fi
+    sudo -v
+  fi
+  if [[ -n "$SURFACE_DESKTOP_USER" ]] && { [[ "$SURFACE_DESKTOP_USER" == root ]] || ! id "$SURFACE_DESKTOP_USER" >/dev/null 2>&1; }; then
+    error "SURFACE_DESKTOP_USER must name an existing non-root account."
+    exit 1
+  fi
+
   install_prerequisites
   install_linux_surface_repository
+  install_firmware
   install_packages
+  print_failure_summary || exit 1
   queue_surface_mok_enrollment || record_failure "queue linux-surface Secure Boot MOK enrollment"
   configure_services
   configure_gnome_tablet_settings
   install_surface_auto_rotate
   install_rotation_lock_toggle
   configure_rotation_lock_shortcut
-  configure_grub
+  configure_grub /etc/default/grub
   configure_iptsd_calibration
   configure_initramfs_modules
 
@@ -980,7 +1077,7 @@ main() {
   printf 'Reboot now. If Secure Boot is enabled, enroll the linux-surface MOK key when prompted; the password is: surface\n'
   printf 'After reboot, verify the kernel with: uname -a\n'
   printf 'The running kernel should contain the string: surface\n'
-  printf 'For touchscreen, verify iptsd after reboot with: systemctl status iptsd.service\n'
+  printf 'For touchscreen, verify iptsd after reboot with: systemctl status "iptsd*"\n'
   printf 'For auto-rotation, verify sensors after reboot with: monitor-sensor\n'
   printf 'For the on-screen keyboard, verify GNOME Settings > Accessibility > Screen Keyboard is enabled.\n'
   printf 'Maliit Keyboard is installed when available for post-login experimentation; GDM still uses GNOME Shell keyboard.\n'
